@@ -13,7 +13,6 @@
     <!-- 为 ECharts 准备一个定义了宽高的 DOM -->
     <div id="main" style="width: 600px; height: 400px"></div>
     <script type="text/javascript">
-      // Extend the Array class
       Array.prototype.max = function () {
         return Math.max.apply(null, this);
       };
@@ -55,12 +54,12 @@
         };
 
         // Matrix algebra
-        kriging_matrix_diag = function (c, n) {
+        let kriging_matrix_diag = function (c, n) {
           let Z = createArrayWithValues(0, n * n);
-          for (i = 0; i < n; i++) Z[i * n + i] = c;
+          for (let i = 0; i < n; i++) Z[i * n + i] = c;
           return Z;
         };
-        kriging_matrix_transpose = function (X, n, m) {
+        let kriging_matrix_transpose = function (X, n, m) {
           let i,
             j,
             Z = Array(m * n);
@@ -68,11 +67,11 @@
             for (j = 0; j < m; j++) Z[j * n + i] = X[i * m + j];
           return Z;
         };
-        kriging_matrix_scale = function (X, c, n, m) {
+        let kriging_matrix_scale = function (X, c, n, m) {
           let i, j;
           for (i = 0; i < n; i++) for (j = 0; j < m; j++) X[i * m + j] *= c;
         };
-        kriging_matrix_add = function (X, Y, n, m) {
+        let kriging_matrix_add = function (X, Y, n, m) {
           let i,
             j,
             Z = Array(n * m);
@@ -81,7 +80,7 @@
           return Z;
         };
         // Naive matrix multiplication
-        kriging_matrix_multiply = function (X, Y, n, m, p) {
+        let kriging_matrix_multiply = function (X, Y, n, m, p) {
           let i,
             j,
             k,
@@ -96,7 +95,7 @@
           return Z;
         };
         // Cholesky decomposition
-        kriging_matrix_chol = function (X, n) {
+        let kriging_matrix_chol = function (X, n) {
           let i,
             j,
             k,
@@ -117,7 +116,7 @@
           return true;
         };
         // Inversion of cholesky decomposition
-        kriging_matrix_chol2inv = function (X, n) {
+        let kriging_matrix_chol2inv = function (X, n) {
           let i, j, k, sum;
           for (i = 0; i < n; i++) {
             X[i * n + i] = 1 / X[i * n + i];
@@ -140,7 +139,7 @@
             for (j = 0; j < i; j++) X[i * n + j] = X[j * n + i];
         };
         // Inversion via gauss-jordan elimination
-        kriging_matrix_solve = function (X, n) {
+        let kriging_matrix_solve = function (X, n) {
           let m = n;
           let b = Array(n * n);
           let indxc = Array(n);
@@ -216,21 +215,27 @@
         };
 
         // Variogram models
-        kriging_variogram_gaussian = function (h, nugget, range, sill, A) {
+        let kriging_variogram_gaussian = function (h, nugget, range, sill, A) {
           return (
             nugget +
             ((sill - nugget) / range) *
               (1.0 - Math.exp(-(1.0 / A) * Math.pow(h / range, 2)))
           );
         };
-        kriging_variogram_exponential = function (h, nugget, range, sill, A) {
+        let kriging_variogram_exponential = function (
+          h,
+          nugget,
+          range,
+          sill,
+          A
+        ) {
           return (
             nugget +
             ((sill - nugget) / range) *
               (1.0 - Math.exp(-(1.0 / A) * (h / range)))
           );
         };
-        kriging_variogram_spherical = function (h, nugget, range, sill, A) {
+        let kriging_variogram_spherical = function (h, nugget, range, sill, A) {
           if (h > range) return nugget + (sill - nugget) / range;
           return (
             nugget +
