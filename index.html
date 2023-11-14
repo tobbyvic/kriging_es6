@@ -1,0 +1,5737 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>ECharts</title>
+    <!-- 引入刚刚下载的 ECharts 文件 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.4.3/echarts.min.js"></script>
+    <script src="
+    https://cdnjs.cloudflare.com/ajax/libs/echarts-gl/2.0.8/echarts-gl.min.js
+"></script>
+  </head>
+  <body>
+    <!-- 为 ECharts 准备一个定义了宽高的 DOM -->
+    <div id="main" style="width: 600px; height: 400px"></div>
+    <script type="text/javascript">
+      // Extend the Array class
+      Array.prototype.max = function () {
+        return Math.max.apply(null, this);
+      };
+      Array.prototype.min = function () {
+        return Math.min.apply(null, this);
+      };
+      Array.prototype.mean = function () {
+        let i, sum;
+        for (i = 0, sum = 0; i < this.length; i++) sum += this[i];
+        return sum / this.length;
+      };
+      Array.prototype.pip = function (x, y) {
+        let i,
+          j,
+          c = false;
+        for (i = 0, j = this.length - 1; i < this.length; j = i++) {
+          if (
+            this[i][1] > y != this[j][1] > y &&
+            x <
+              ((this[j][0] - this[i][0]) * (y - this[i][1])) /
+                (this[j][1] - this[i][1]) +
+                this[i][0]
+          ) {
+            c = !c;
+          }
+        }
+        return c;
+      };
+
+      function kriging() {
+        let kriging = {};
+
+        let createArrayWithValues = function (value, n) {
+          let array = [];
+          for (let i = 0; i < n; i++) {
+            array.push(value);
+          }
+          return array;
+        };
+
+        // Matrix algebra
+        kriging_matrix_diag = function (c, n) {
+          let Z = createArrayWithValues(0, n * n);
+          for (i = 0; i < n; i++) Z[i * n + i] = c;
+          return Z;
+        };
+        kriging_matrix_transpose = function (X, n, m) {
+          let i,
+            j,
+            Z = Array(m * n);
+          for (i = 0; i < n; i++)
+            for (j = 0; j < m; j++) Z[j * n + i] = X[i * m + j];
+          return Z;
+        };
+        kriging_matrix_scale = function (X, c, n, m) {
+          let i, j;
+          for (i = 0; i < n; i++) for (j = 0; j < m; j++) X[i * m + j] *= c;
+        };
+        kriging_matrix_add = function (X, Y, n, m) {
+          let i,
+            j,
+            Z = Array(n * m);
+          for (i = 0; i < n; i++)
+            for (j = 0; j < m; j++) Z[i * m + j] = X[i * m + j] + Y[i * m + j];
+          return Z;
+        };
+        // Naive matrix multiplication
+        kriging_matrix_multiply = function (X, Y, n, m, p) {
+          let i,
+            j,
+            k,
+            Z = Array(n * p);
+          for (i = 0; i < n; i++) {
+            for (j = 0; j < p; j++) {
+              Z[i * p + j] = 0;
+              for (k = 0; k < m; k++)
+                Z[i * p + j] += X[i * m + k] * Y[k * p + j];
+            }
+          }
+          return Z;
+        };
+        // Cholesky decomposition
+        kriging_matrix_chol = function (X, n) {
+          let i,
+            j,
+            k,
+            sum,
+            p = Array(n);
+          for (i = 0; i < n; i++) p[i] = X[i * n + i];
+          for (i = 0; i < n; i++) {
+            for (j = 0; j < i; j++) p[i] -= X[i * n + j] * X[i * n + j];
+            if (p[i] <= 0) return false;
+            p[i] = Math.sqrt(p[i]);
+            for (j = i + 1; j < n; j++) {
+              for (k = 0; k < i; k++)
+                X[j * n + i] -= X[j * n + k] * X[i * n + k];
+              X[j * n + i] /= p[i];
+            }
+          }
+          for (i = 0; i < n; i++) X[i * n + i] = p[i];
+          return true;
+        };
+        // Inversion of cholesky decomposition
+        kriging_matrix_chol2inv = function (X, n) {
+          let i, j, k, sum;
+          for (i = 0; i < n; i++) {
+            X[i * n + i] = 1 / X[i * n + i];
+            for (j = i + 1; j < n; j++) {
+              sum = 0;
+              for (k = i; k < j; k++) sum -= X[j * n + k] * X[k * n + i];
+              X[j * n + i] = sum / X[j * n + j];
+            }
+          }
+          for (i = 0; i < n; i++) for (j = i + 1; j < n; j++) X[i * n + j] = 0;
+          for (i = 0; i < n; i++) {
+            X[i * n + i] *= X[i * n + i];
+            for (k = i + 1; k < n; k++)
+              X[i * n + i] += X[k * n + i] * X[k * n + i];
+            for (j = i + 1; j < n; j++)
+              for (k = j; k < n; k++)
+                X[i * n + j] += X[k * n + i] * X[k * n + j];
+          }
+          for (i = 0; i < n; i++)
+            for (j = 0; j < i; j++) X[i * n + j] = X[j * n + i];
+        };
+        // Inversion via gauss-jordan elimination
+        kriging_matrix_solve = function (X, n) {
+          let m = n;
+          let b = Array(n * n);
+          let indxc = Array(n);
+          let indxr = Array(n);
+          let ipiv = Array(n);
+          let i, icol, irow, j, k, l, ll;
+          let big, dum, pivinv, temp;
+
+          for (i = 0; i < n; i++)
+            for (j = 0; j < n; j++) {
+              if (i == j) b[i * n + j] = 1;
+              else b[i * n + j] = 0;
+            }
+          for (j = 0; j < n; j++) ipiv[j] = 0;
+          for (i = 0; i < n; i++) {
+            big = 0;
+            for (j = 0; j < n; j++) {
+              if (ipiv[j] != 1) {
+                for (k = 0; k < n; k++) {
+                  if (ipiv[k] == 0) {
+                    if (Math.abs(X[j * n + k]) >= big) {
+                      big = Math.abs(X[j * n + k]);
+                      irow = j;
+                      icol = k;
+                    }
+                  }
+                }
+              }
+            }
+            ++ipiv[icol];
+
+            if (irow != icol) {
+              for (l = 0; l < n; l++) {
+                temp = X[irow * n + l];
+                X[irow * n + l] = X[icol * n + l];
+                X[icol * n + l] = temp;
+              }
+              for (l = 0; l < m; l++) {
+                temp = b[irow * n + l];
+                b[irow * n + l] = b[icol * n + l];
+                b[icol * n + l] = temp;
+              }
+            }
+            indxr[i] = irow;
+            indxc[i] = icol;
+
+            if (X[icol * n + icol] == 0) return false; // Singular
+
+            pivinv = 1 / X[icol * n + icol];
+            X[icol * n + icol] = 1;
+            for (l = 0; l < n; l++) X[icol * n + l] *= pivinv;
+            for (l = 0; l < m; l++) b[icol * n + l] *= pivinv;
+
+            for (ll = 0; ll < n; ll++) {
+              if (ll != icol) {
+                dum = X[ll * n + icol];
+                X[ll * n + icol] = 0;
+                for (l = 0; l < n; l++) X[ll * n + l] -= X[icol * n + l] * dum;
+                for (l = 0; l < m; l++) b[ll * n + l] -= b[icol * n + l] * dum;
+              }
+            }
+          }
+          for (l = n - 1; l >= 0; l--)
+            if (indxr[l] != indxc[l]) {
+              for (k = 0; k < n; k++) {
+                temp = X[k * n + indxr[l]];
+                X[k * n + indxr[l]] = X[k * n + indxc[l]];
+                X[k * n + indxc[l]] = temp;
+              }
+            }
+
+          return true;
+        };
+
+        // Variogram models
+        kriging_variogram_gaussian = function (h, nugget, range, sill, A) {
+          return (
+            nugget +
+            ((sill - nugget) / range) *
+              (1.0 - Math.exp(-(1.0 / A) * Math.pow(h / range, 2)))
+          );
+        };
+        kriging_variogram_exponential = function (h, nugget, range, sill, A) {
+          return (
+            nugget +
+            ((sill - nugget) / range) *
+              (1.0 - Math.exp(-(1.0 / A) * (h / range)))
+          );
+        };
+        kriging_variogram_spherical = function (h, nugget, range, sill, A) {
+          if (h > range) return nugget + (sill - nugget) / range;
+          return (
+            nugget +
+            ((sill - nugget) / range) *
+              (1.5 * (h / range) - 0.5 * Math.pow(h / range, 3))
+          );
+        };
+
+        // Train using gaussian processes with bayesian priors
+        kriging.train = function (t, x, y, model, sigma2, alpha) {
+          let variogram = {
+            t: t,
+            x: x,
+            y: y,
+            nugget: 0.0,
+            range: 0.0,
+            sill: 0.0,
+            A: 1 / 3,
+            n: 0,
+          };
+          switch (model) {
+            case "gaussian":
+              variogram.model = kriging_variogram_gaussian;
+              break;
+            case "exponential":
+              variogram.model = kriging_variogram_exponential;
+              break;
+            case "spherical":
+              variogram.model = kriging_variogram_spherical;
+              break;
+          }
+
+          // Lag distance/semivariance
+          let i,
+            j,
+            k,
+            l,
+            n = t.length;
+          let distance = Array((n * n - n) / 2);
+          for (i = 0, k = 0; i < n; i++)
+            for (j = 0; j < i; j++, k++) {
+              distance[k] = Array(2);
+              distance[k][0] = Math.pow(
+                Math.pow(x[i] - x[j], 2) + Math.pow(y[i] - y[j], 2),
+                0.5
+              );
+              distance[k][1] = Math.abs(t[i] - t[j]);
+            }
+          distance.sort(function (a, b) {
+            return a[0] - b[0];
+          });
+          variogram.range = distance[(n * n - n) / 2 - 1][0];
+
+          // Bin lag distance
+          let lags = (n * n - n) / 2 > 30 ? 30 : (n * n - n) / 2;
+          let tolerance = variogram.range / lags;
+          let lag = createArrayWithValues(0, lags);
+          let semi = createArrayWithValues(0, lags);
+          if (lags < 30) {
+            for (l = 0; l < lags; l++) {
+              lag[l] = distance[l][0];
+              semi[l] = distance[l][1];
+            }
+          } else {
+            for (
+              i = 0, j = 0, k = 0, l = 0;
+              i < lags && j < (n * n - n) / 2;
+              i++, k = 0
+            ) {
+              while (distance[j][0] <= (i + 1) * tolerance) {
+                lag[l] += distance[j][0];
+                semi[l] += distance[j][1];
+                j++;
+                k++;
+                if (j >= (n * n - n) / 2) break;
+              }
+              if (k > 0) {
+                lag[l] /= k;
+                semi[l] /= k;
+                l++;
+              }
+            }
+            if (l < 2) return variogram; // Error: Not enough points
+          }
+
+          // Feature transformation
+          n = l;
+          variogram.range = lag[n - 1] - lag[0];
+          let X = createArrayWithValues(1, 2 * n);
+          let Y = Array(n);
+          let A = variogram.A;
+          for (i = 0; i < n; i++) {
+            switch (model) {
+              case "gaussian":
+                X[i * 2 + 1] =
+                  1.0 -
+                  Math.exp(-(1.0 / A) * Math.pow(lag[i] / variogram.range, 2));
+                break;
+              case "exponential":
+                X[i * 2 + 1] =
+                  1.0 - Math.exp((-(1.0 / A) * lag[i]) / variogram.range);
+                break;
+              case "spherical":
+                X[i * 2 + 1] =
+                  1.5 * (lag[i] / variogram.range) -
+                  0.5 * Math.pow(lag[i] / variogram.range, 3);
+                break;
+            }
+            Y[i] = semi[i];
+          }
+
+          // Least squares
+          let Xt = kriging_matrix_transpose(X, n, 2);
+          let Z = kriging_matrix_multiply(Xt, X, 2, n, 2);
+          Z = kriging_matrix_add(Z, kriging_matrix_diag(1 / alpha, 2), 2, 2);
+          let cloneZ = Z.slice(0);
+          if (kriging_matrix_chol(Z, 2)) kriging_matrix_chol2inv(Z, 2);
+          else {
+            kriging_matrix_solve(cloneZ, 2);
+            Z = cloneZ;
+          }
+          let W = kriging_matrix_multiply(
+            kriging_matrix_multiply(Z, Xt, 2, 2, n),
+            Y,
+            2,
+            n,
+            1
+          );
+
+          // Variogram parameters
+          variogram.nugget = W[0];
+          variogram.sill = W[1] * variogram.range + variogram.nugget;
+          variogram.n = x.length;
+
+          // Gram matrix with prior
+          n = x.length;
+          let K = Array(n * n);
+          for (i = 0; i < n; i++) {
+            for (j = 0; j < i; j++) {
+              K[i * n + j] = variogram.model(
+                Math.pow(
+                  Math.pow(x[i] - x[j], 2) + Math.pow(y[i] - y[j], 2),
+                  0.5
+                ),
+                variogram.nugget,
+                variogram.range,
+                variogram.sill,
+                variogram.A
+              );
+              K[j * n + i] = K[i * n + j];
+            }
+            K[i * n + i] = variogram.model(
+              0,
+              variogram.nugget,
+              variogram.range,
+              variogram.sill,
+              variogram.A
+            );
+          }
+
+          // Inverse penalized Gram matrix projected to target vector
+          let C = kriging_matrix_add(K, kriging_matrix_diag(sigma2, n), n, n);
+          let cloneC = C.slice(0);
+          if (kriging_matrix_chol(C, n)) kriging_matrix_chol2inv(C, n);
+          else {
+            kriging_matrix_solve(cloneC, n);
+            C = cloneC;
+          }
+
+          // Copy unprojected inverted matrix as K
+          let K1 = C.slice(0);
+          let M = kriging_matrix_multiply(C, t, n, n, 1);
+          variogram.K = K1;
+          variogram.M = M;
+
+          return variogram;
+        };
+
+        // Model prediction
+        kriging.predict = function (x, y, variogram) {
+          let i,
+            k = Array(variogram.n);
+          for (i = 0; i < variogram.n; i++)
+            k[i] = variogram.model(
+              Math.pow(
+                Math.pow(x - variogram.x[i], 2) +
+                  Math.pow(y - variogram.y[i], 2),
+                0.5
+              ),
+              variogram.nugget,
+              variogram.range,
+              variogram.sill,
+              variogram.A
+            );
+          return kriging_matrix_multiply(k, variogram.M, 1, variogram.n, 1)[0];
+        };
+        kriging.variance = function (x, y, variogram) {
+          let i,
+            k = Array(variogram.n);
+          for (i = 0; i < variogram.n; i++)
+            k[i] = variogram.model(
+              Math.pow(
+                Math.pow(x - variogram.x[i], 2) +
+                  Math.pow(y - variogram.y[i], 2),
+                0.5
+              ),
+              variogram.nugget,
+              variogram.range,
+              variogram.sill,
+              variogram.A
+            );
+          return (
+            variogram.model(
+              0,
+              variogram.nugget,
+              variogram.range,
+              variogram.sill,
+              variogram.A
+            ) +
+            kriging_matrix_multiply(
+              kriging_matrix_multiply(
+                k,
+                variogram.K,
+                1,
+                variogram.n,
+                variogram.n
+              ),
+              k,
+              1,
+              variogram.n,
+              1
+            )[0]
+          );
+        };
+
+        // Gridded matrices or contour paths
+        kriging.grid = function (polygons, variogram, width) {
+          let i,
+            j,
+            k,
+            n = polygons.length;
+          if (n == 0) return;
+
+          // Boundaries of polygons space
+          let xlim = [polygons[0][0][0], polygons[0][0][0]];
+          let ylim = [polygons[0][0][1], polygons[0][0][1]];
+          for (
+            i = 0;
+            i < n;
+            i++ // Polygons
+          )
+            for (j = 0; j < polygons[i].length; j++) {
+              // Vertices
+              if (polygons[i][j][0] < xlim[0]) xlim[0] = polygons[i][j][0];
+              if (polygons[i][j][0] > xlim[1]) xlim[1] = polygons[i][j][0];
+              if (polygons[i][j][1] < ylim[0]) ylim[0] = polygons[i][j][1];
+              if (polygons[i][j][1] > ylim[1]) ylim[1] = polygons[i][j][1];
+            }
+
+          // Alloc for O(n^2) space
+          let xtarget, ytarget;
+          let a = Array(2),
+            b = Array(2);
+          let lxlim = Array(2); // Local dimensions
+          let lylim = Array(2); // Local dimensions
+          let x = Math.ceil((xlim[1] - xlim[0]) / width);
+          let y = Math.ceil((ylim[1] - ylim[0]) / width);
+
+          let A = Array(x + 1);
+          for (i = 0; i <= x; i++) A[i] = Array(y + 1);
+          for (i = 0; i < n; i++) {
+            // Range for polygons[i]
+            lxlim[0] = polygons[i][0][0];
+            lxlim[1] = lxlim[0];
+            lylim[0] = polygons[i][0][1];
+            lylim[1] = lylim[0];
+            for (j = 1; j < polygons[i].length; j++) {
+              // Vertices
+              if (polygons[i][j][0] < lxlim[0]) lxlim[0] = polygons[i][j][0];
+              if (polygons[i][j][0] > lxlim[1]) lxlim[1] = polygons[i][j][0];
+              if (polygons[i][j][1] < lylim[0]) lylim[0] = polygons[i][j][1];
+              if (polygons[i][j][1] > lylim[1]) lylim[1] = polygons[i][j][1];
+            }
+
+            // Loop through polygon subspace
+            a[0] = Math.floor(
+              (lxlim[0] - ((lxlim[0] - xlim[0]) % width) - xlim[0]) / width
+            );
+            a[1] = Math.ceil(
+              (lxlim[1] - ((lxlim[1] - xlim[1]) % width) - xlim[0]) / width
+            );
+            b[0] = Math.floor(
+              (lylim[0] - ((lylim[0] - ylim[0]) % width) - ylim[0]) / width
+            );
+            b[1] = Math.ceil(
+              (lylim[1] - ((lylim[1] - ylim[1]) % width) - ylim[0]) / width
+            );
+            for (j = a[0]; j <= a[1]; j++)
+              for (k = b[0]; k <= b[1]; k++) {
+                xtarget = xlim[0] + j * width;
+                ytarget = ylim[0] + k * width;
+                if (polygons[i].pip(xtarget, ytarget))
+                  A[j][k] = kriging.predict(xtarget, ytarget, variogram);
+              }
+          }
+          A.xlim = xlim;
+          A.ylim = ylim;
+          A.zlim = [variogram.t.min(), variogram.t.max()];
+          A.width = width;
+          return A;
+        };
+        kriging.contour = function (value, polygons, variogram) {};
+
+        // Plotting on the DOM
+        kriging.plot = function (canvas, grid, xlim, ylim, colors) {
+          // Clear screen
+          let ctx = canvas.getContext("2d");
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+          // Starting boundaries
+          let range = [
+            xlim[1] - xlim[0],
+            ylim[1] - ylim[0],
+            grid.zlim[1] - grid.zlim[0],
+          ];
+          let i, j, x, y, z;
+          let n = grid.length;
+          let m = grid[0].length;
+          let wx = Math.ceil((grid.width * canvas.width) / (xlim[1] - xlim[0]));
+          let wy = Math.ceil(
+            (grid.width * canvas.height) / (ylim[1] - ylim[0])
+          );
+          for (i = 0; i < n; i++)
+            for (j = 0; j < m; j++) {
+              if (grid[i][j] == undefined) continue;
+              x =
+                (canvas.width * (i * grid.width + grid.xlim[0] - xlim[0])) /
+                range[0];
+              y =
+                canvas.height *
+                (1 - (j * grid.width + grid.ylim[0] - ylim[0]) / range[1]);
+              z = (grid[i][j] - grid.zlim[0]) / range[2];
+              if (z < 0.0) z = 0.0;
+              if (z > 1.0) z = 1.0;
+
+              ctx.fillStyle = colors[Math.floor((colors.length - 1) * z)];
+              ctx.fillRect(
+                Math.round(x - wx / 2),
+                Math.round(y - wy / 2),
+                wx,
+                wy
+              );
+            }
+        };
+
+        return kriging;
+      }
+
+      console.log("kriging", kriging);
+      const data = [
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 89.25,
+          点Ave坐标Z: 4.09,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 19.75,
+          点Ave坐标Z: 0.9899999,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 48.75,
+          点Ave坐标Z: 1.8,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 118.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 92.25,
+          点Ave坐标Z: 1.91,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 94.25,
+          点Ave坐标Z: 3.42,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 72.75,
+          点Ave坐标Z: 7.7,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 69.25,
+          点Ave坐标Z: 1.62,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 44.25,
+          点Ave坐标Z: 2.61,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 123.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 43.75,
+          点Ave坐标Z: 8.96,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 145.75,
+          点Ave坐标Z: 0.32,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 39.25,
+          点Ave坐标Z: 2.4,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 66.25,
+          点Ave坐标Z: 10.56,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 109.25,
+          点Ave坐标Z: 6.69,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 144.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 37.75,
+          点Ave坐标Z: 1.42,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 18.75,
+          点Ave坐标Z: 1.09,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 111.75,
+          点Ave坐标Z: 0.03,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 53.75,
+          点Ave坐标Z: 2.27,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 57.75,
+          点Ave坐标Z: 1.13,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 132.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 26.75,
+          点Ave坐标Z: 2.57,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 23.75,
+          点Ave坐标Z: 1.22,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 88.75,
+          点Ave坐标Z: 0.42,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 83.75,
+          点Ave坐标Z: 1.87,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 110.25,
+          点Ave坐标Z: 6.05,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 67.25,
+          点Ave坐标Z: 1.28,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 64.25,
+          点Ave坐标Z: 1.14,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 27.75,
+          点Ave坐标Z: 0.8,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 53.75,
+          点Ave坐标Z: 6.29,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 90.25,
+          点Ave坐标Z: 0.89,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 83.25,
+          点Ave坐标Z: 2.25,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 18.25,
+          点Ave坐标Z: 1.09,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 82.25,
+          点Ave坐标Z: 8.22,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 69.75,
+          点Ave坐标Z: 10.54,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 14.75,
+          点Ave坐标Z: 0.92,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 87.75,
+          点Ave坐标Z: 4.17,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 16.25,
+          点Ave坐标Z: 1.77,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 55.25,
+          点Ave坐标Z: 1.85,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 80.75,
+          点Ave坐标Z: 4.77,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 82.75,
+          点Ave坐标Z: 4.78,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 62.25,
+          点Ave坐标Z: 2.25,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 38.25,
+          点Ave坐标Z: 2.18,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 105.75,
+          点Ave坐标Z: 2.76,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 29.75,
+          点Ave坐标Z: 1.9,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 49.75,
+          点Ave坐标Z: 6.35,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 133.75,
+          点Ave坐标Z: 0.02,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 141.75,
+          点Ave坐标Z: 0.08,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 110.75,
+          点Ave坐标Z: 5.7,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 122.75,
+          点Ave坐标Z: 1.02,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 86.25,
+          点Ave坐标Z: 4.49,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 140.25,
+          点Ave坐标Z: 5.67,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 107.75,
+          点Ave坐标Z: 1.89,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 114.75,
+          点Ave坐标Z: 0.06,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 32.25,
+          点Ave坐标Z: 0.87,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 120.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 13.25,
+          点Ave坐标Z: 2.18,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 51.25,
+          点Ave坐标Z: 1.47,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 70.25,
+          点Ave坐标Z: 10.41,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 130.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 56.25,
+          点Ave坐标Z: 5.36,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 125.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 50.25,
+          点Ave坐标Z: 1.08,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 76.25,
+          点Ave坐标Z: 1.76,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 83.25,
+          点Ave坐标Z: 2.73,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 121.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 47.25,
+          点Ave坐标Z: 2.05,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 36.75,
+          点Ave坐标Z: 0.92,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 72.75,
+          点Ave坐标Z: 4.27,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 132.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 132.75,
+          点Ave坐标Z: 0.98,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 67.25,
+          点Ave坐标Z: 1.25,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 137.75,
+          点Ave坐标Z: 5.72,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 22.25,
+          点Ave坐标Z: 1.83,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 102.75,
+          点Ave坐标Z: 4.88,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 89.75,
+          点Ave坐标Z: 1.75,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 70.25,
+          点Ave坐标Z: 1.44,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 69.75,
+          点Ave坐标Z: 3.37,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 113.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 94.75,
+          点Ave坐标Z: 7.36,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 145.75,
+          点Ave坐标Z: 0.86,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 89.25,
+          点Ave坐标Z: 0.23,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 15.75,
+          点Ave坐标Z: 0.91,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 46.75,
+          点Ave坐标Z: 1.75,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 52.25,
+          点Ave坐标Z: 1.7,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 148.25,
+          点Ave坐标Z: 5.73,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 76.25,
+          点Ave坐标Z: 8.849999,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 69.25,
+          点Ave坐标Z: 1.99,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 117.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 135.75,
+          点Ave坐标Z: 0.09999999,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 119.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 41.25,
+          点Ave坐标Z: 2.77,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 74.75,
+          点Ave坐标Z: 8.87,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 96.25,
+          点Ave坐标Z: 3.83,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 140.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 123.25,
+          点Ave坐标Z: 0.29,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 113.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 36.75,
+          点Ave坐标Z: 1.3,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 54.75,
+          点Ave坐标Z: 5.35,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 118.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 141.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 134.75,
+          点Ave坐标Z: 5.24,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 129.75,
+          点Ave坐标Z: 8.86,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 61.75,
+          点Ave坐标Z: 2.39,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 141.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 61.75,
+          点Ave坐标Z: 6.26,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 108.25,
+          点Ave坐标Z: 4.66,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 20.75,
+          点Ave坐标Z: 1.41,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 124.25,
+          点Ave坐标Z: 8.849999,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 90.25,
+          点Ave坐标Z: 1.2,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 81.75,
+          点Ave坐标Z: 8.59,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 29.25,
+          点Ave坐标Z: 0.54,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 129.75,
+          点Ave坐标Z: 9.13,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 40.25,
+          点Ave坐标Z: 1.58,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 41.25,
+          点Ave坐标Z: 8.62,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 50.25,
+          点Ave坐标Z: 1.68,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 92.75,
+          点Ave坐标Z: 1.25,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 26.75,
+          点Ave坐标Z: 0.62,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 112.25,
+          点Ave坐标Z: 0.07,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 18.75,
+          点Ave坐标Z: 0.71,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 33.75,
+          点Ave坐标Z: 0.59,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 27.25,
+          点Ave坐标Z: 1.41,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 39.75,
+          点Ave坐标Z: 2.82,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 56.75,
+          点Ave坐标Z: 5.83,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 122.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 34.75,
+          点Ave坐标Z: 1.34,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 96.75,
+          点Ave坐标Z: 2.92,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 95.75,
+          点Ave坐标Z: 3.85,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 33.75,
+          点Ave坐标Z: 0.77,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 103.25,
+          点Ave坐标Z: 3.05,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 55.75,
+          点Ave坐标Z: 5.78,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 57.25,
+          点Ave坐标Z: 5.33,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 74.75,
+          点Ave坐标Z: 6.93,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 24.75,
+          点Ave坐标Z: 0.69,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 82.25,
+          点Ave坐标Z: 8.11,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 122.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 135.25,
+          点Ave坐标Z: 0.09999999,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 96.75,
+          点Ave坐标Z: 8.51,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 53.75,
+          点Ave坐标Z: 5.96,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 90.25,
+          点Ave坐标Z: 1.03,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 91.75,
+          点Ave坐标Z: 1.68,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 68.75,
+          点Ave坐标Z: 1.41,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 109.75,
+          点Ave坐标Z: 6.08,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 146.75,
+          点Ave坐标Z: 0.05,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 16.75,
+          点Ave坐标Z: 1.06,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 64.75,
+          点Ave坐标Z: 1.15,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 143.75,
+          点Ave坐标Z: 5.64,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 94.75,
+          点Ave坐标Z: 4.68,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 75.25,
+          点Ave坐标Z: 8.74,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 52.25,
+          点Ave坐标Z: 1.37,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 115.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 119.25,
+          点Ave坐标Z: 0.15,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 105.75,
+          点Ave坐标Z: 2.49,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 110.25,
+          点Ave坐标Z: 6.46,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 55.75,
+          点Ave坐标Z: 5.64,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 72.25,
+          点Ave坐标Z: 3.46,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 62.75,
+          点Ave坐标Z: 7.47,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 63.25,
+          点Ave坐标Z: 1.17,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 135.75,
+          点Ave坐标Z: 5.25,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 58.25,
+          点Ave坐标Z: 1.05,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 112.75,
+          点Ave坐标Z: 0.16,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 140.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 112.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 99.75,
+          点Ave坐标Z: 3.73,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 105.25,
+          点Ave坐标Z: 2.57,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 142.25,
+          点Ave坐标Z: 0.01,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 88.25,
+          点Ave坐标Z: 3,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 130.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 70.25,
+          点Ave坐标Z: 2.66,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 131.75,
+          点Ave坐标Z: 6.89,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 64.25,
+          点Ave坐标Z: 9.42,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 130.75,
+          点Ave坐标Z: 8.87,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 123.75,
+          点Ave坐标Z: 0.95,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 58.75,
+          点Ave坐标Z: 5.39,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 71.25,
+          点Ave坐标Z: 8.86,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 127.25,
+          点Ave坐标Z: 8.92,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 27.75,
+          点Ave坐标Z: 0.66,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 104.25,
+          点Ave坐标Z: 1.56,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 64.75,
+          点Ave坐标Z: 0.84,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 34.75,
+          点Ave坐标Z: 0.93,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 33.25,
+          点Ave坐标Z: 1.41,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 60.75,
+          点Ave坐标Z: 5.64,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 135.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 49.25,
+          点Ave坐标Z: 8.41,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 30.75,
+          点Ave坐标Z: 0.81,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 19.25,
+          点Ave坐标Z: 0.84,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 85.75,
+          点Ave坐标Z: 3.4,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 69.25,
+          点Ave坐标Z: 10.68,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 93.25,
+          点Ave坐标Z: 2.35,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 121.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 73.75,
+          点Ave坐标Z: 3.89,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 56.25,
+          点Ave坐标Z: 2.34,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 36.75,
+          点Ave坐标Z: 0.54,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 116.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 27.75,
+          点Ave坐标Z: 1.34,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 125.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 144.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 31.25,
+          点Ave坐标Z: 1.22,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 104.75,
+          点Ave坐标Z: 3.5,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 107.25,
+          点Ave坐标Z: 1.46,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 40.75,
+          点Ave坐标Z: 1.78,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 14.25,
+          点Ave坐标Z: 2.66,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 52.25,
+          点Ave坐标Z: 6.01,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 63.25,
+          点Ave坐标Z: 7.53,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 52.25,
+          点Ave坐标Z: 2.44,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 115.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 41.25,
+          点Ave坐标Z: 2.22,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 94.25,
+          点Ave坐标Z: 2.98,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 116.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 107.25,
+          点Ave坐标Z: 1.26,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 96.25,
+          点Ave坐标Z: 8.12,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 80.75,
+          点Ave坐标Z: 9.389999,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 84.25,
+          点Ave坐标Z: 1.82,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 144.25,
+          点Ave坐标Z: 0.73,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 138.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 130.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 26.25,
+          点Ave坐标Z: 1.21,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 57.75,
+          点Ave坐标Z: 5.46,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 146.75,
+          点Ave坐标Z: 0.5,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 68.25,
+          点Ave坐标Z: 10.22,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 55.75,
+          点Ave坐标Z: 2.33,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 91.75,
+          点Ave坐标Z: 2.05,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 122.75,
+          点Ave坐标Z: 0.7,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 69.25,
+          点Ave坐标Z: 10.14,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 127.25,
+          点Ave坐标Z: 9.349999,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 62.75,
+          点Ave坐标Z: 1.34,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 146.25,
+          点Ave坐标Z: 0.65,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 64.25,
+          点Ave坐标Z: 9.349999,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 123.25,
+          点Ave坐标Z: 0.9,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 36.75,
+          点Ave坐标Z: 1.07,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 25.25,
+          点Ave坐标Z: 0.9,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 126.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 20.25,
+          点Ave坐标Z: 0.9899999,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 18.25,
+          点Ave坐标Z: 1.21,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 109.75,
+          点Ave坐标Z: 6.52,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 121.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 112.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 28.25,
+          点Ave坐标Z: 0.58,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 117.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 114.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 90.25,
+          点Ave坐标Z: 3.51,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 65.25,
+          点Ave坐标Z: 1.06,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 118.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 125.75,
+          点Ave坐标Z: 0.13,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 60.25,
+          点Ave坐标Z: 5.92,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 58.25,
+          点Ave坐标Z: 5.38,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 148.75,
+          点Ave坐标Z: 1.08,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 138.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 107.25,
+          点Ave坐标Z: 0.67,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 120.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 118.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 70.75,
+          点Ave坐标Z: 10.65,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 20.25,
+          点Ave坐标Z: 1.18,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 77.25,
+          点Ave坐标Z: 2.7,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 128.25,
+          点Ave坐标Z: 9.44,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 45.25,
+          点Ave坐标Z: 2.43,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 90.25,
+          点Ave坐标Z: 0.19,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 99.25,
+          点Ave坐标Z: 8.12,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 105.75,
+          点Ave坐标Z: 2.69,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 65.75,
+          点Ave坐标Z: 1.17,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 124.25,
+          点Ave坐标Z: 8.849999,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 56.75,
+          点Ave坐标Z: 1.12,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 135.25,
+          点Ave坐标Z: 5.23,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 17.75,
+          点Ave坐标Z: 2.47,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 13.75,
+          点Ave坐标Z: 2.31,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 108.25,
+          点Ave坐标Z: 5.37,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 101.75,
+          点Ave坐标Z: 3.03,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 60.25,
+          点Ave坐标Z: 1.04,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 40.25,
+          点Ave坐标Z: 2.72,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 34.75,
+          点Ave坐标Z: 1.43,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 77.25,
+          点Ave坐标Z: 2.46,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 77.75,
+          点Ave坐标Z: 10.62,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 23.75,
+          点Ave坐标Z: 0.69,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 65.75,
+          点Ave坐标Z: 1.23,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 140.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 72.75,
+          点Ave坐标Z: 3.9,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 133.25,
+          点Ave坐标Z: 0.28,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 32.25,
+          点Ave坐标Z: 0.5,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 52.25,
+          点Ave坐标Z: 2.29,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 83.25,
+          点Ave坐标Z: 3.48,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 121.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 87.25,
+          点Ave坐标Z: 2.17,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 133.75,
+          点Ave坐标Z: 0.01,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 103.25,
+          点Ave坐标Z: 4.4,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 67.75,
+          点Ave坐标Z: 9.139999,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 50.75,
+          点Ave坐标Z: 5.35,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 19.25,
+          点Ave坐标Z: 1.08,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 17.25,
+          点Ave坐标Z: 1.33,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 20.75,
+          点Ave坐标Z: 0.77,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 126.75,
+          点Ave坐标Z: 9.21,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 29.25,
+          点Ave坐标Z: 0.67,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 138.25,
+          点Ave坐标Z: 0.36,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 107.25,
+          点Ave坐标Z: 1.48,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 127.25,
+          点Ave坐标Z: 8.849999,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 149.25,
+          点Ave坐标Z: 3.28,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 38.75,
+          点Ave坐标Z: 1.21,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 58.25,
+          点Ave坐标Z: 1.09,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 84.25,
+          点Ave坐标Z: 1.97,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 123.75,
+          点Ave坐标Z: 1.19,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 135.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 25.25,
+          点Ave坐标Z: 1.84,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 113.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 70.75,
+          点Ave坐标Z: 8.87,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 23.25,
+          点Ave坐标Z: 0.94,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 52.75,
+          点Ave坐标Z: 1.27,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 89.75,
+          点Ave坐标Z: 2.57,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 83.25,
+          点Ave坐标Z: 6.68,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 50.25,
+          点Ave坐标Z: 5.38,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 89.75,
+          点Ave坐标Z: 3.61,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 126.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 140.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 83.25,
+          点Ave坐标Z: 6.56,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 36.75,
+          点Ave坐标Z: 1.46,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 138.75,
+          点Ave坐标Z: 0.27,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 119.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 41.25,
+          点Ave坐标Z: 8.389999,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 40.75,
+          点Ave坐标Z: 2.75,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 101.75,
+          点Ave坐标Z: 3.39,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 78.25,
+          点Ave坐标Z: 7.76,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 133.25,
+          点Ave坐标Z: 5.33,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 34.75,
+          点Ave坐标Z: 0.77,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 81.25,
+          点Ave坐标Z: 4.12,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 40.75,
+          点Ave坐标Z: 2.69,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 46.25,
+          点Ave坐标Z: 8.29,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 28.75,
+          点Ave坐标Z: 1.01,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 36.25,
+          点Ave坐标Z: 0.72,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 64.75,
+          点Ave坐标Z: 9.599999,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 141.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 70.75,
+          点Ave坐标Z: 9.38,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 58.25,
+          点Ave坐标Z: 5.37,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 38.25,
+          点Ave坐标Z: 2.18,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 50.75,
+          点Ave坐标Z: 0.96,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 145.25,
+          点Ave坐标Z: 0.37,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 85.25,
+          点Ave坐标Z: 1.59,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 134.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 50.75,
+          点Ave坐标Z: 5.38,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 119.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 18.25,
+          点Ave坐标Z: 1,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 72.75,
+          点Ave坐标Z: 4,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 117.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 86.75,
+          点Ave坐标Z: 3.56,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 41.75,
+          点Ave坐标Z: 8.599999,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 112.25,
+          点Ave坐标Z: 0.13,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 104.25,
+          点Ave坐标Z: 3.46,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 36.75,
+          点Ave坐标Z: 1.43,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 69.25,
+          点Ave坐标Z: 9.73,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 35.75,
+          点Ave坐标Z: 0.94,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 87.25,
+          点Ave坐标Z: 2.59,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 86.75,
+          点Ave坐标Z: 1.08,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 109.75,
+          点Ave坐标Z: 6.03,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 112.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 74.75,
+          点Ave坐标Z: 4.59,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 21.75,
+          点Ave坐标Z: 0.87,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 46.75,
+          点Ave坐标Z: 2.16,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 25.75,
+          点Ave坐标Z: 1.81,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 55.25,
+          点Ave坐标Z: 1.65,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 15.75,
+          点Ave坐标Z: 2.13,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 104.25,
+          点Ave坐标Z: 2.08,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 128.25,
+          点Ave坐标Z: 8.86,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 97.75,
+          点Ave坐标Z: 8.58,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 18.75,
+          点Ave坐标Z: 0.88,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 29.75,
+          点Ave坐标Z: 1.02,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 31.25,
+          点Ave坐标Z: 0.62,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 92.75,
+          点Ave坐标Z: 1.34,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 41.75,
+          点Ave坐标Z: 8.37,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 65.75,
+          点Ave坐标Z: 10.53,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 70.25,
+          点Ave坐标Z: 10.38,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 51.25,
+          点Ave坐标Z: 1.03,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 57.75,
+          点Ave坐标Z: 5.87,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 120.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 91.75,
+          点Ave坐标Z: 1.9,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 136.75,
+          点Ave坐标Z: 0.04,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 86.75,
+          点Ave坐标Z: 4.08,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 45.75,
+          点Ave坐标Z: 2.5,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 16.25,
+          点Ave坐标Z: 2.27,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 132.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 131.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 92.75,
+          点Ave坐标Z: 1.49,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 82.25,
+          点Ave坐标Z: 4.12,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 35.75,
+          点Ave坐标Z: 0.7,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 126.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 21.75,
+          点Ave坐标Z: 1.13,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 119.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 13.25,
+          点Ave坐标Z: 1.9,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 146.25,
+          点Ave坐标Z: 5.77,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 115.25,
+          点Ave坐标Z: 0.28,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 20.25,
+          点Ave坐标Z: 0.92,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 84.75,
+          点Ave坐标Z: 4.07,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 80.75,
+          点Ave坐标Z: 5.17,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 114.75,
+          点Ave坐标Z: 0.22,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 123.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 40.75,
+          点Ave坐标Z: 2.25,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 108.25,
+          点Ave坐标Z: 5.34,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 98.25,
+          点Ave坐标Z: 3.5,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 93.25,
+          点Ave坐标Z: 2.36,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 16.75,
+          点Ave坐标Z: 0.76,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 70.75,
+          点Ave坐标Z: 2.04,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 129.75,
+          点Ave坐标Z: 8.74,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 53.75,
+          点Ave坐标Z: 5.4,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 143.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 138.75,
+          点Ave坐标Z: 0.2,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 63.25,
+          点Ave坐标Z: 1.21,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 62.25,
+          点Ave坐标Z: 1.54,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 54.25,
+          点Ave坐标Z: 1.42,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 82.75,
+          点Ave坐标Z: 4.4,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 52.75,
+          点Ave坐标Z: 5.39,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 100.75,
+          点Ave坐标Z: 2.87,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 109.75,
+          点Ave坐标Z: 6.41,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 73.75,
+          点Ave坐标Z: 9.76,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 133.75,
+          点Ave坐标Z: 0.66,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 64.75,
+          点Ave坐标Z: 1,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 84.75,
+          点Ave坐标Z: 5.66,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 83.75,
+          点Ave坐标Z: 2.97,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 58.75,
+          点Ave坐标Z: 1.97,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 66.75,
+          点Ave坐标Z: 10.14,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 107.75,
+          点Ave坐标Z: 1.82,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 37.25,
+          点Ave坐标Z: 2.28,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 73.25,
+          点Ave坐标Z: 5.86,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 141.25,
+          点Ave坐标Z: 0.57,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 101.25,
+          点Ave坐标Z: 3.51,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 92.25,
+          点Ave坐标Z: 1.44,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 143.25,
+          点Ave坐标Z: 5.66,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 60.25,
+          点Ave坐标Z: 1.84,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 33.75,
+          点Ave坐标Z: 2.75,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 37.75,
+          点Ave坐标Z: 0.96,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 124.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 51.75,
+          点Ave坐标Z: 2.24,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 74.75,
+          点Ave坐标Z: 5.24,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 54.25,
+          点Ave坐标Z: 2.28,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 15.75,
+          点Ave坐标Z: 0.77,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 95.75,
+          点Ave坐标Z: 3.26,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 110.25,
+          点Ave坐标Z: 6.21,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 52.75,
+          点Ave坐标Z: 1.42,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 119.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 136.75,
+          点Ave坐标Z: 0.09999999,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 66.75,
+          点Ave坐标Z: 10.06,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 69.25,
+          点Ave坐标Z: 2.89,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 126.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 95.25,
+          点Ave坐标Z: 7.4,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 28.25,
+          点Ave坐标Z: 1.19,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 112.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 63.75,
+          点Ave坐标Z: 0.97,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 24.25,
+          点Ave坐标Z: 1.47,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 37.25,
+          点Ave坐标Z: 1.8,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 88.25,
+          点Ave坐标Z: 4.46,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 123.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 100.75,
+          点Ave坐标Z: 7.35,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 75.25,
+          点Ave坐标Z: 2.95,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 144.25,
+          点Ave坐标Z: 0.09,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 148.25,
+          点Ave坐标Z: 1.29,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 17.25,
+          点Ave坐标Z: 0.78,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 47.25,
+          点Ave坐标Z: 8.559999,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 29.75,
+          点Ave坐标Z: 0.53,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 28.25,
+          点Ave坐标Z: 0.63,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 88.25,
+          点Ave坐标Z: 3.71,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 31.25,
+          点Ave坐标Z: 1.98,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 76.25,
+          点Ave坐标Z: 2.69,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 63.75,
+          点Ave坐标Z: 0.86,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 117.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 93.75,
+          点Ave坐标Z: 2.39,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 108.75,
+          点Ave坐标Z: 6.07,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 52.75,
+          点Ave坐标Z: 5.35,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 76.25,
+          点Ave坐标Z: 2.23,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 90.75,
+          点Ave坐标Z: 0.71,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 108.75,
+          点Ave坐标Z: 6.01,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 36.75,
+          点Ave坐标Z: 0.64,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 108.25,
+          点Ave坐标Z: 4.62,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 25.25,
+          点Ave坐标Z: 1.24,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 126.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 79.75,
+          点Ave坐标Z: 10.08,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 128.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 15.75,
+          点Ave坐标Z: 0.68,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 16.25,
+          点Ave坐标Z: 0.9899999,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 100.75,
+          点Ave坐标Z: 7.34,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 141.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 49.75,
+          点Ave坐标Z: 1.29,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 36.75,
+          点Ave坐标Z: 0.66,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 105.75,
+          点Ave坐标Z: 1.8,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 33.25,
+          点Ave坐标Z: 0.57,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 81.25,
+          点Ave坐标Z: 5.72,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 149.75,
+          点Ave坐标Z: 2.82,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 69.75,
+          点Ave坐标Z: 9.65,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 80.25,
+          点Ave坐标Z: 9.9,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 85.75,
+          点Ave坐标Z: 2.27,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 107.75,
+          点Ave坐标Z: 1.77,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 37.75,
+          点Ave坐标Z: 0.87,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 19.25,
+          点Ave坐标Z: 0.94,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 79.75,
+          点Ave坐标Z: 10.24,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 86.25,
+          点Ave坐标Z: 4.91,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 136.25,
+          点Ave坐标Z: 0.31,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 70.75,
+          点Ave坐标Z: 9.07,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 58.25,
+          点Ave坐标Z: 1.17,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 44.75,
+          点Ave坐标Z: 2.5,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 46.75,
+          点Ave坐标Z: 8.29,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 100.25,
+          点Ave坐标Z: 7.78,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 13.25,
+          点Ave坐标Z: 2.43,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 70.75,
+          点Ave坐标Z: 10.49,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 69.25,
+          点Ave坐标Z: 10.06,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 95.25,
+          点Ave坐标Z: 8.79,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 101.75,
+          点Ave坐标Z: 4.37,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 134.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 39.75,
+          点Ave坐标Z: 2.54,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 83.25,
+          点Ave坐标Z: 2.68,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 20.75,
+          点Ave坐标Z: 1.18,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 143.25,
+          点Ave坐标Z: 0.04,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 90.75,
+          点Ave坐标Z: 1.23,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 101.25,
+          点Ave坐标Z: 3.69,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 67.75,
+          点Ave坐标Z: 10.59,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 27.75,
+          点Ave坐标Z: 1.09,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 68.75,
+          点Ave坐标Z: 10.02,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 86.75,
+          点Ave坐标Z: 3.97,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 102.25,
+          点Ave坐标Z: 3.13,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 121.25,
+          点Ave坐标Z: 0.08,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 144.75,
+          点Ave坐标Z: 5.76,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 15.25,
+          点Ave坐标Z: 3.19,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 146.75,
+          点Ave坐标Z: 5.74,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 36.75,
+          点Ave坐标Z: 1.15,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 79.75,
+          点Ave坐标Z: 3.9,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 87.25,
+          点Ave坐标Z: 4.54,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 81.25,
+          点Ave坐标Z: 4.97,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 36.25,
+          点Ave坐标Z: 0.58,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 127.25,
+          点Ave坐标Z: 9.2,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 33.75,
+          点Ave坐标Z: 1.2,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 64.25,
+          点Ave坐标Z: 0.88,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 89.75,
+          点Ave坐标Z: 0.11,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 36.25,
+          点Ave坐标Z: 1.22,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 16.25,
+          点Ave坐标Z: 0.76,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 133.75,
+          点Ave坐标Z: 0.5,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 53.75,
+          点Ave坐标Z: 1.92,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 58.75,
+          点Ave坐标Z: 5.44,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 76.25,
+          点Ave坐标Z: 2.16,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 131.75,
+          点Ave坐标Z: 0.08,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 93.75,
+          点Ave坐标Z: 2.58,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 44.75,
+          点Ave坐标Z: 8.639999,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 36.75,
+          点Ave坐标Z: 1.43,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 84.75,
+          点Ave坐标Z: 3.23,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 43.25,
+          点Ave坐标Z: 8.27,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 57.25,
+          点Ave坐标Z: 1.05,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 24.25,
+          点Ave坐标Z: 1.72,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 70.25,
+          点Ave坐标Z: 1.36,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 67.75,
+          点Ave坐标Z: 2.15,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 111.75,
+          点Ave坐标Z: 0.27,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 33.75,
+          点Ave坐标Z: 0.49,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 13.75,
+          点Ave坐标Z: 1.89,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 104.25,
+          点Ave坐标Z: 3.69,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 13.75,
+          点Ave坐标Z: 2.21,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 20.25,
+          点Ave坐标Z: 1.07,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 117.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 91.75,
+          点Ave坐标Z: 1.29,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 107.75,
+          点Ave坐标Z: 1.66,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 76.25,
+          点Ave坐标Z: 7.81,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 65.75,
+          点Ave坐标Z: 9.34,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 55.25,
+          点Ave坐标Z: 1.81,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 42.25,
+          点Ave坐标Z: 8.389999,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 143.75,
+          点Ave坐标Z: 5.64,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 108.75,
+          点Ave坐标Z: 5.75,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 27.75,
+          点Ave坐标Z: 1.13,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 61.75,
+          点Ave坐标Z: 1.14,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 113.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 37.25,
+          点Ave坐标Z: 0.91,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 49.75,
+          点Ave坐标Z: 1.9,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 20.75,
+          点Ave坐标Z: 0.83,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 94.75,
+          点Ave坐标Z: 8.87,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 116.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 85.25,
+          点Ave坐标Z: 2.35,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 38.75,
+          点Ave坐标Z: 1.89,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 36.25,
+          点Ave坐标Z: 1.52,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 146.75,
+          点Ave坐标Z: 0.33,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 82.75,
+          点Ave坐标Z: 4.02,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 75.25,
+          点Ave坐标Z: 3.53,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 85.75,
+          点Ave坐标Z: 6.4,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 15.75,
+          点Ave坐标Z: 2.64,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 148.75,
+          点Ave坐标Z: 0.65,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 131.75,
+          点Ave坐标Z: 8.72,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 116.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 54.25,
+          点Ave坐标Z: 1.5,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 139.75,
+          点Ave坐标Z: 5.73,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 92.25,
+          点Ave坐标Z: 0.9899999,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 53.25,
+          点Ave坐标Z: 5.62,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 124.25,
+          点Ave坐标Z: 8.86,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 117.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 34.25,
+          点Ave坐标Z: 1.29,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 14.75,
+          点Ave坐标Z: 3.34,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 95.75,
+          点Ave坐标Z: 3.5,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 61.25,
+          点Ave坐标Z: 6.04,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 54.25,
+          点Ave坐标Z: 5.35,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 13.75,
+          点Ave坐标Z: 2.69,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 70.75,
+          点Ave坐标Z: 2.3,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 95.75,
+          点Ave坐标Z: 4.18,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 108.75,
+          点Ave坐标Z: 5.72,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 96.25,
+          点Ave坐标Z: 3.35,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 138.25,
+          点Ave坐标Z: 5.77,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 68.25,
+          点Ave坐标Z: 10.15,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 13.25,
+          点Ave坐标Z: 1.93,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 54.75,
+          点Ave坐标Z: 5.39,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 91.75,
+          点Ave坐标Z: 2.35,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 89.75,
+          点Ave坐标Z: 3.67,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 117.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 56.25,
+          点Ave坐标Z: 5.8,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 109.25,
+          点Ave坐标Z: 7.36,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 17.25,
+          点Ave坐标Z: 2.6,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 81.25,
+          点Ave坐标Z: 5.64,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 69.75,
+          点Ave坐标Z: 10.6,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 112.25,
+          点Ave坐标Z: 0.09999999,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 105.75,
+          点Ave坐标Z: 3.31,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 74.75,
+          点Ave坐标Z: 5.2,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 143.75,
+          点Ave坐标Z: 5.66,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 29.75,
+          点Ave坐标Z: 0.6,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 19.25,
+          点Ave坐标Z: 1.45,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 74.25,
+          点Ave坐标Z: 3.07,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 131.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 45.25,
+          点Ave坐标Z: 8.11,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 110.25,
+          点Ave坐标Z: 5.76,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 16.75,
+          点Ave坐标Z: 1,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 72.25,
+          点Ave坐标Z: 2.86,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 72.75,
+          点Ave坐标Z: 10.44,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 127.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 85.25,
+          点Ave坐标Z: 3.55,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 127.25,
+          点Ave坐标Z: 7.27,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 140.25,
+          点Ave坐标Z: 0.16,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 31.75,
+          点Ave坐标Z: 0.86,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 52.25,
+          点Ave坐标Z: 1.39,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 37.25,
+          点Ave坐标Z: 1.76,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 69.75,
+          点Ave坐标Z: 1.4,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 64.25,
+          点Ave坐标Z: 1,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 129.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 54.75,
+          点Ave坐标Z: 1.51,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 99.25,
+          点Ave坐标Z: 7.66,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 96.75,
+          点Ave坐标Z: 3.88,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 16.75,
+          点Ave坐标Z: 1.21,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 77.75,
+          点Ave坐标Z: 8.88,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 33.25,
+          点Ave坐标Z: 1.46,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 148.25,
+          点Ave坐标Z: 5.75,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 65.25,
+          点Ave坐标Z: 10.18,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 123.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 94.25,
+          点Ave坐标Z: 3.64,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 42.25,
+          点Ave坐标Z: 9.33,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 25.75,
+          点Ave坐标Z: 0.49,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 56.75,
+          点Ave坐标Z: 1.79,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 58.25,
+          点Ave坐标Z: 2.1,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 39.25,
+          点Ave坐标Z: 2.56,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 80.75,
+          点Ave坐标Z: 5.33,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 44.75,
+          点Ave坐标Z: 3.17,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 70.75,
+          点Ave坐标Z: 2.79,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 141.25,
+          点Ave坐标Z: 5.64,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 69.75,
+          点Ave坐标Z: 10.03,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 18.75,
+          点Ave坐标Z: 2.77,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 96.75,
+          点Ave坐标Z: 7.64,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 22.25,
+          点Ave坐标Z: 1.3,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 141.75,
+          点Ave坐标Z: 0.35,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 101.75,
+          点Ave坐标Z: 5.56,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 84.25,
+          点Ave坐标Z: 2.93,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 143.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 17.25,
+          点Ave坐标Z: 0.83,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 17.75,
+          点Ave坐标Z: 0.82,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 58.25,
+          点Ave坐标Z: 1,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 45.75,
+          点Ave坐标Z: 8.69,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 22.75,
+          点Ave坐标Z: 1.06,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 75.25,
+          点Ave坐标Z: 2.82,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 76.25,
+          点Ave坐标Z: 9.22,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 24.75,
+          点Ave坐标Z: 1.19,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 99.25,
+          点Ave坐标Z: 7.84,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 23.75,
+          点Ave坐标Z: 1.23,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 124.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 29.75,
+          点Ave坐标Z: 0.97,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 24.25,
+          点Ave坐标Z: 1.81,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 91.75,
+          点Ave坐标Z: 1.13,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 60.75,
+          点Ave坐标Z: 2.36,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 110.25,
+          点Ave坐标Z: 7.14,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 65.75,
+          点Ave坐标Z: 1.34,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 56.25,
+          点Ave坐标Z: 2.72,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 88.75,
+          点Ave坐标Z: 4.31,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 78.75,
+          点Ave坐标Z: 10.69,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 114.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 64.25,
+          点Ave坐标Z: 1.3,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 81.25,
+          点Ave坐标Z: 9.05,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 68.25,
+          点Ave坐标Z: 1.27,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 121.75,
+          点Ave坐标Z: 0.08,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 117.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 60.25,
+          点Ave坐标Z: 2.57,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 20.75,
+          点Ave坐标Z: 0.8,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 59.75,
+          点Ave坐标Z: 5.85,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 90.25,
+          点Ave坐标Z: 2.42,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 60.75,
+          点Ave坐标Z: 2.65,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 28.75,
+          点Ave坐标Z: 0.93,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 21.25,
+          点Ave坐标Z: 0.83,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 28.75,
+          点Ave坐标Z: 1.22,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 80.25,
+          点Ave坐标Z: 9.15,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 34.25,
+          点Ave坐标Z: 0.82,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 80.75,
+          点Ave坐标Z: 8.45,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 32.75,
+          点Ave坐标Z: 0.61,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 66.25,
+          点Ave坐标Z: 10.65,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 121.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 14.25,
+          点Ave坐标Z: 1.92,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 134.25,
+          点Ave坐标Z: 5.34,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 58.75,
+          点Ave坐标Z: 0.97,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 24.25,
+          点Ave坐标Z: 0.59,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 120.25,
+          点Ave坐标Z: 0.63,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 64.75,
+          点Ave坐标Z: 9.4,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 69.75,
+          点Ave坐标Z: 1.49,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 127.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 40.75,
+          点Ave坐标Z: 2.76,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 37.25,
+          点Ave坐标Z: 0.96,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 17.75,
+          点Ave坐标Z: 0.79,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 124.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 21.25,
+          点Ave坐标Z: 0.73,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 18.75,
+          点Ave坐标Z: 1.39,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 108.75,
+          点Ave坐标Z: 6.73,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 136.25,
+          点Ave坐标Z: 0.08,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 133.25,
+          点Ave坐标Z: 0.11,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 89.25,
+          点Ave坐标Z: 3.54,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 139.25,
+          点Ave坐标Z: 5.7,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 138.75,
+          点Ave坐标Z: 5.72,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 74.25,
+          点Ave坐标Z: 6,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 93.75,
+          点Ave坐标Z: 3.84,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 113.25,
+          点Ave坐标Z: 0.5,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 86.75,
+          点Ave坐标Z: 1.34,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 31.25,
+          点Ave坐标Z: 1.1,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 67.25,
+          点Ave坐标Z: 1.31,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 19.75,
+          点Ave坐标Z: 0.84,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 115.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 39.25,
+          点Ave坐标Z: 2.62,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 126.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 114.25,
+          点Ave坐标Z: 0.59,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 52.25,
+          点Ave坐标Z: 1.82,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 28.75,
+          点Ave坐标Z: 1.45,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 121.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 26.75,
+          点Ave坐标Z: 1.56,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 105.75,
+          点Ave坐标Z: 1.67,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 52.75,
+          点Ave坐标Z: 1.88,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 39.75,
+          点Ave坐标Z: 1.77,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 19.75,
+          点Ave坐标Z: 0.76,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 141.75,
+          点Ave坐标Z: 5.64,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 142.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 26.25,
+          点Ave坐标Z: 1.23,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 50.75,
+          点Ave坐标Z: 5.68,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 88.25,
+          点Ave坐标Z: 0.83,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 124.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 32.25,
+          点Ave坐标Z: 1.62,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 103.25,
+          点Ave坐标Z: 3.93,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 55.75,
+          点Ave坐标Z: 1.95,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 99.25,
+          点Ave坐标Z: 8.63,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 118.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 97.25,
+          点Ave坐标Z: 5.2,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 51.75,
+          点Ave坐标Z: 6.09,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 17.75,
+          点Ave坐标Z: 0.79,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 74.75,
+          点Ave坐标Z: 3.41,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 34.75,
+          点Ave坐标Z: 2.13,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 107.25,
+          点Ave坐标Z: 1.67,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 49.25,
+          点Ave坐标Z: 8.36,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 53.25,
+          点Ave坐标Z: 1.89,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 139.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 142.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 97.75,
+          点Ave坐标Z: 8.11,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 99.75,
+          点Ave坐标Z: 7.92,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 140.25,
+          点Ave坐标Z: 5.68,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 38.25,
+          点Ave坐标Z: 1.73,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 104.25,
+          点Ave坐标Z: 3.8,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 93.75,
+          点Ave坐标Z: 3.72,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 147.75,
+          点Ave坐标Z: 0.87,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 149.25,
+          点Ave坐标Z: 1.61,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 143.25,
+          点Ave坐标Z: 5.64,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 68.75,
+          点Ave坐标Z: 3.05,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 116.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 141.25,
+          点Ave坐标Z: 0.08,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 15.25,
+          点Ave坐标Z: 1.26,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 117.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 86.25,
+          点Ave坐标Z: 2.82,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 118.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 80.25,
+          点Ave坐标Z: 9.7,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 121.75,
+          点Ave坐标Z: 0.13,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 25.75,
+          点Ave坐标Z: 0.67,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 91.25,
+          点Ave坐标Z: 0.84,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 47.25,
+          点Ave坐标Z: 8.61,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 116.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 93.25,
+          点Ave坐标Z: 3.25,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 43.75,
+          点Ave坐标Z: 8.809999,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 55.25,
+          点Ave坐标Z: 1.82,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 76.25,
+          点Ave坐标Z: 1.43,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 133.75,
+          点Ave坐标Z: 5.27,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 93.75,
+          点Ave坐标Z: 8.34,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 129.25,
+          点Ave坐标Z: 8.82,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 33.25,
+          点Ave坐标Z: 0.74,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 140.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 131.75,
+          点Ave坐标Z: 8.74,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 41.75,
+          点Ave坐标Z: 8.94,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 97.25,
+          点Ave坐标Z: 7.77,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 18.75,
+          点Ave坐标Z: 0.81,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 128.25,
+          点Ave坐标Z: 8.66,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 30.75,
+          点Ave坐标Z: 1.2,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 111.25,
+          点Ave坐标Z: 0.73,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 138.75,
+          点Ave坐标Z: 0.51,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 60.25,
+          点Ave坐标Z: 1.02,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 89.25,
+          点Ave坐标Z: 2.67,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 60.75,
+          点Ave坐标Z: 0.93,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 14.75,
+          点Ave坐标Z: 1.28,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 19.25,
+          点Ave坐标Z: 0.75,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 140.75,
+          点Ave坐标Z: 5.96,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 63.75,
+          点Ave坐标Z: 1.34,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 108.25,
+          点Ave坐标Z: 4.93,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 75.25,
+          点Ave坐标Z: 4.63,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 32.25,
+          点Ave坐标Z: 0.59,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 61.25,
+          点Ave坐标Z: 5.93,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 102.25,
+          点Ave坐标Z: 3.16,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 45.25,
+          点Ave坐标Z: 7.94,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 121.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 21.25,
+          点Ave坐标Z: 0.78,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 81.75,
+          点Ave坐标Z: 5.45,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 67.25,
+          点Ave坐标Z: 9.83,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 17.75,
+          点Ave坐标Z: 0.76,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 79.75,
+          点Ave坐标Z: 3.13,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 23.25,
+          点Ave坐标Z: 1.08,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 77.75,
+          点Ave坐标Z: 2.48,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 146.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 43.25,
+          点Ave坐标Z: 2.65,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 147.25,
+          点Ave坐标Z: 0.53,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 94.75,
+          点Ave坐标Z: 7.78,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 96.75,
+          点Ave坐标Z: 3.14,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 29.75,
+          点Ave坐标Z: 0.79,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 56.75,
+          点Ave坐标Z: 5.41,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 47.25,
+          点Ave坐标Z: 2.33,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 71.75,
+          点Ave坐标Z: 10.59,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 79.25,
+          点Ave坐标Z: 8.25,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 68.75,
+          点Ave坐标Z: 10.34,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 118.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 69.75,
+          点Ave坐标Z: 9.07,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 103.75,
+          点Ave坐标Z: 3.81,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 65.75,
+          点Ave坐标Z: 10.25,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 139.75,
+          点Ave坐标Z: 0.02,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 35.75,
+          点Ave坐标Z: 0.9,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 64.25,
+          点Ave坐标Z: 1.18,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 71.75,
+          点Ave坐标Z: 9.36,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 60.25,
+          点Ave坐标Z: 5.5,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 82.75,
+          点Ave坐标Z: 3.87,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 134.25,
+          点Ave坐标Z: 5.25,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 67.75,
+          点Ave坐标Z: 9.73,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 26.25,
+          点Ave坐标Z: 1.64,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 89.25,
+          点Ave坐标Z: 0.93,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 38.75,
+          点Ave坐标Z: 1.53,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 26.75,
+          点Ave坐标Z: 1.2,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 62.25,
+          点Ave坐标Z: 6.86,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 105.25,
+          点Ave坐标Z: 1.5,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 111.25,
+          点Ave坐标Z: 3.06,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 28.75,
+          点Ave坐标Z: 1.15,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 43.25,
+          点Ave坐标Z: 8.73,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 39.75,
+          点Ave坐标Z: 3.07,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 83.75,
+          点Ave坐标Z: 4.94,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 56.25,
+          点Ave坐标Z: 2.71,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 34.75,
+          点Ave坐标Z: 0.78,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 148.25,
+          点Ave坐标Z: 0.62,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 103.75,
+          点Ave坐标Z: 3.39,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 81.75,
+          点Ave坐标Z: 4,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 59.25,
+          点Ave坐标Z: 1.22,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 125.25,
+          点Ave坐标Z: 9.17,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 108.75,
+          点Ave坐标Z: 6.27,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 71.75,
+          点Ave坐标Z: 9.01,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 70.75,
+          点Ave坐标Z: 10.08,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 69.75,
+          点Ave坐标Z: 10.03,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 102.75,
+          点Ave坐标Z: 2.4,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 56.25,
+          点Ave坐标Z: 5.38,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 62.75,
+          点Ave坐标Z: 1.33,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 126.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 13.25,
+          点Ave坐标Z: 1.97,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 100.25,
+          点Ave坐标Z: 3.61,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 38.75,
+          点Ave坐标Z: 1.81,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 133.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 63.25,
+          点Ave坐标Z: 1.17,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 138.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 97.75,
+          点Ave坐标Z: 8.63,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 80.75,
+          点Ave坐标Z: 5.37,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 66.75,
+          点Ave坐标Z: 9.42,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 123.75,
+          点Ave坐标Z: 1.55,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 46.75,
+          点Ave坐标Z: 2.59,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 33.75,
+          点Ave坐标Z: 1.04,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 94.25,
+          点Ave坐标Z: 4.2,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 65.25,
+          点Ave坐标Z: 0.91,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 116.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 121.25,
+          点Ave坐标Z: 0.39,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 142.25,
+          点Ave坐标Z: 1.61,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 39.25,
+          点Ave坐标Z: 2.68,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 110.75,
+          点Ave坐标Z: 5.61,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 36.75,
+          点Ave坐标Z: 1.16,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 59.25,
+          点Ave坐标Z: 1.83,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 56.25,
+          点Ave坐标Z: 2.76,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 66.75,
+          点Ave坐标Z: 9.11,
+        },
+        {
+          点Ave坐标X: 0.75,
+          点Ave坐标Y: 126.25,
+          点Ave坐标Z: 8.99,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 116.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 85.75,
+          点Ave坐标Z: 4.99,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 84.75,
+          点Ave坐标Z: 4.9,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 102.25,
+          点Ave坐标Z: 2.79,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 89.25,
+          点Ave坐标Z: 1.58,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 63.75,
+          点Ave坐标Z: 1.79,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 143.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 33.25,
+          点Ave坐标Z: 0.78,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 44.75,
+          点Ave坐标Z: 8.26,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 90.25,
+          点Ave坐标Z: 2.12,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 20.75,
+          点Ave坐标Z: 0.76,
+        },
+        {
+          点Ave坐标X: 13.25,
+          点Ave坐标Y: 59.25,
+          点Ave坐标Z: 1.08,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 55.75,
+          点Ave坐标Z: 5.34,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 140.25,
+          点Ave坐标Z: 5.67,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 21.25,
+          点Ave坐标Z: 0.92,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 104.75,
+          点Ave坐标Z: 3.33,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 60.25,
+          点Ave坐标Z: 2.22,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 81.25,
+          点Ave坐标Z: 4.86,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 55.75,
+          点Ave坐标Z: 2.29,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 141.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 16.75,
+          点Ave坐标Z: 0.98,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 132.25,
+          点Ave坐标Z: 0.15,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 44.75,
+          点Ave坐标Z: 2.58,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 68.25,
+          点Ave坐标Z: 2.59,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 117.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 12.75,
+          点Ave坐标Y: 71.25,
+          点Ave坐标Z: 1.57,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 107.75,
+          点Ave坐标Z: 3.87,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 122.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 48.25,
+          点Ave坐标Z: 8.26,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 148.25,
+          点Ave坐标Z: 1.74,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 93.75,
+          点Ave坐标Z: 3.7,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 128.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 80.25,
+          点Ave坐标Z: 8.41,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 87.25,
+          点Ave坐标Z: 3.42,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 105.25,
+          点Ave坐标Z: 2.92,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 102.25,
+          点Ave坐标Z: 2.34,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 142.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 55.75,
+          点Ave坐标Z: 5.4,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 119.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 92.75,
+          点Ave坐标Z: 2.26,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 122.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 145.75,
+          点Ave坐标Z: 0.14,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 53.75,
+          点Ave坐标Z: 1.48,
+        },
+        {
+          点Ave坐标X: 0.25,
+          点Ave坐标Y: 21.25,
+          点Ave坐标Z: 2.82,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 126.75,
+          点Ave坐标Z: 6.86,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 134.75,
+          点Ave坐标Z: 1.32,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 41.75,
+          点Ave坐标Z: 2,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 16.75,
+          点Ave坐标Z: 1.33,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 75.25,
+          点Ave坐标Z: 8.98,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 23.75,
+          点Ave坐标Z: 1.05,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 88.75,
+          点Ave坐标Z: 1.02,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 125.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 132.75,
+          点Ave坐标Z: 5.32,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 89.25,
+          点Ave坐标Z: 0.32,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 16.75,
+          点Ave坐标Z: 0.71,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 139.25,
+          点Ave坐标Z: 0.23,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 97.75,
+          点Ave坐标Z: 3.09,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 144.25,
+          点Ave坐标Z: 5.65,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 27.75,
+          点Ave坐标Z: 0.62,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 99.25,
+          点Ave坐标Z: 8.33,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 65.75,
+          点Ave坐标Z: 1.66,
+        },
+        {
+          点Ave坐标X: 2.25,
+          点Ave坐标Y: 139.75,
+          点Ave坐标Z: 5.72,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 94.75,
+          点Ave坐标Z: 4.54,
+        },
+        {
+          点Ave坐标X: 9.75,
+          点Ave坐标Y: 72.75,
+          点Ave坐标Z: 3.77,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 49.75,
+          点Ave坐标Z: 2.14,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 147.25,
+          点Ave坐标Z: 0.38,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 65.25,
+          点Ave坐标Z: 10.13,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 140.75,
+          点Ave坐标Z: 5.66,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 139.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 1.25,
+          点Ave坐标Y: 81.25,
+          点Ave坐标Z: 9.12,
+        },
+        {
+          点Ave坐标X: 5.75,
+          点Ave坐标Y: 62.25,
+          点Ave坐标Z: 1.3,
+        },
+        {
+          点Ave坐标X: 5.25,
+          点Ave坐标Y: 132.75,
+          点Ave坐标Z: 1.86,
+        },
+        {
+          点Ave坐标X: 11.75,
+          点Ave坐标Y: 137.75,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 137.25,
+          点Ave坐标Z: 0.22,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 41.25,
+          点Ave坐标Z: 8.58,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 100.75,
+          点Ave坐标Z: 4.17,
+        },
+        {
+          点Ave坐标X: 7.75,
+          点Ave坐标Y: 67.25,
+          点Ave坐标Z: 1.7,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 61.25,
+          点Ave坐标Z: 0.95,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 58.75,
+          点Ave坐标Z: 1.28,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 128.75,
+          点Ave坐标Z: 8.889999,
+        },
+        {
+          点Ave坐标X: 12.25,
+          点Ave坐标Y: 132.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 89.25,
+          点Ave坐标Z: 2.74,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 106.75,
+          点Ave坐标Z: 2.13,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 107.75,
+          点Ave坐标Z: 3.62,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 47.75,
+          点Ave坐标Z: 8.179999,
+        },
+        {
+          点Ave坐标X: 6.75,
+          点Ave坐标Y: 111.25,
+          点Ave坐标Z: 0.58,
+        },
+        {
+          点Ave坐标X: 8.75,
+          点Ave坐标Y: 82.75,
+          点Ave坐标Z: 6.31,
+        },
+        {
+          点Ave坐标X: 10.25,
+          点Ave坐标Y: 71.75,
+          点Ave坐标Z: 3.05,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 143.75,
+          点Ave坐标Z: 0.23,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 41.25,
+          点Ave坐标Z: 8.47,
+        },
+        {
+          点Ave坐标X: 7.25,
+          点Ave坐标Y: 103.25,
+          点Ave坐标Z: 4.41,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 68.25,
+          点Ave坐标Z: 9.929999,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 66.75,
+          点Ave坐标Z: 1.43,
+        },
+        {
+          点Ave坐标X: 4.25,
+          点Ave坐标Y: 124.25,
+          点Ave坐标Z: 8.849999,
+        },
+        {
+          点Ave坐标X: 4.75,
+          点Ave坐标Y: 16.25,
+          点Ave坐标Z: 1.03,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 110.25,
+          点Ave坐标Z: 6.41,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 61.75,
+          点Ave坐标Z: 0.9899999,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 91.75,
+          点Ave坐标Z: 1.34,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 77.25,
+          点Ave坐标Z: 2.72,
+        },
+        {
+          点Ave坐标X: 6.25,
+          点Ave坐标Y: 96.75,
+          点Ave坐标Z: 5.15,
+        },
+        {
+          点Ave坐标X: 3.25,
+          点Ave坐标Y: 81.75,
+          点Ave坐标Z: 8.61,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 58.25,
+          点Ave坐标Z: 5.44,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 81.25,
+          点Ave坐标Z: 3.86,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 28.75,
+          点Ave坐标Z: 1.35,
+        },
+        {
+          点Ave坐标X: 14.15,
+          点Ave坐标Y: 139.25,
+          点Ave坐标Z: 0,
+        },
+        {
+          点Ave坐标X: 11.25,
+          点Ave坐标Y: 89.25,
+          点Ave坐标Z: 3.96,
+        },
+        {
+          点Ave坐标X: 10.75,
+          点Ave坐标Y: 45.75,
+          点Ave坐标Z: 3.01,
+        },
+        {
+          点Ave坐标X: 3.75,
+          点Ave坐标Y: 85.75,
+          点Ave坐标Z: 1.86,
+        },
+        {
+          点Ave坐标X: 9.25,
+          点Ave坐标Y: 49.75,
+          点Ave坐标Z: 1.42,
+        },
+        {
+          点Ave坐标X: 13.75,
+          点Ave坐标Y: 42.25,
+          点Ave坐标Z: 1.88,
+        },
+        {
+          点Ave坐标X: 1.75,
+          点Ave坐标Y: 87.75,
+          点Ave坐标Z: 1.2,
+        },
+        {
+          点Ave坐标X: 2.75,
+          点Ave坐标Y: 63.25,
+          点Ave坐标Z: 7.54,
+        },
+        {
+          点Ave坐标X: 8.25,
+          点Ave坐标Y: 101.25,
+          点Ave坐标Z: 5.18,
+        },
+      ];
+
+      let chartData = data.map((item) => {
+        return [
+          Number(item["点Ave坐标X"]),
+          Number(item["点Ave坐标Y"]),
+          Number(item["点Ave坐标Z"]),
+        ];
+      });
+      let chartData1 = chartData.sort((a, b) => {
+        return a[0] - b[0];
+      });
+      // 函数拟合
+      //   let xys = chartData1.map((item, index) => {
+      //     return [item[0], item[1]];
+      //   });
+      //   let zs = chartData1.map((item, index) => {
+      //     return item[2];
+      //   });
+
+      let t = chartData1.map((item, index) => {
+        return item[2];
+      });
+      let x = chartData1.map((item, index) => {
+        return item[0];
+      });
+      let y = chartData1.map((item, index) => {
+        return item[1];
+      });
+      let dataXMin = Math.min(...x);
+      let dataXMax = Math.max(...x);
+      let dataYMin = Math.min(...y);
+      let dataYMax = Math.max(...y);
+      let dataZMin = Math.min(...t);
+      let dataZMax = Math.max(...t);
+
+      let model = "exponential";
+      let sigma2 = 0,
+        alpha = 100;
+      let kri = kriging();
+      let variogram = kri.train(t, x, y, model, sigma2, alpha);
+
+      // 基于准备好的dom，初始化echarts实例
+      let myChart = echarts.init(document.getElementById("main"));
+
+      // 指定图表的配置项和数据
+      let option = {
+        tooltip: {},
+        backgroundColor: "#fff",
+        // visualMap: {
+        //   show: false,
+        //   dimension: 2,
+        //   min: -1,
+        //   max: 1,
+        //   inRange: {
+        //     color: [
+        //       "#313695",
+        //       "#4575b4",
+        //       "#74add1",
+        //       "#abd9e9",
+        //       "#e0f3f8",
+        //       "#ffffbf",
+        //       "#fee090",
+        //       "#fdae61",
+        //       "#f46d43",
+        //       "#d73027",
+        //       "#a50026",
+        //     ],
+        //   },
+        // },
+        visualMap: {
+          show: false,
+          min: 1,
+          max: 7,
+          inRange: {
+            color: [
+              "#313695",
+              "#4575b4",
+              "#74add1",
+              "#abd9e9",
+              "#e0f3f8",
+              "#ffffbf",
+              "#fee090",
+              "#fdae61",
+              "#f46d43",
+              "#d73027",
+              "#a50026",
+            ],
+          },
+        },
+        xAxis3D: {
+          type: "value",
+          minInterval: 0.5,
+        },
+        yAxis3D: {
+          type: "value",
+        },
+        zAxis3D: {
+          type: "value",
+          max: dataZMax,
+          // splitNumber: 2,
+        },
+        grid3D: {
+          viewControl: {
+            // projection: 'orthographic'
+          },
+          postEffect: {
+            colorCorrection: true,
+          },
+          boxHeight: 20,
+        },
+        series: [
+          {
+            type: "surface",
+            wireframe: {
+              show: false,
+            },
+            // parametric: false,
+            shading: "lambert",
+            // data: chartData1,
+            equation: {
+              x: {
+                step: 0.5,
+                min: dataXMin,
+                max: dataXMax,
+              },
+              y: {
+                step: 0.5,
+                min: dataYMin,
+                max: dataYMax,
+              },
+              z: function (x, y) {
+                return kri.predict(x, y, variogram);
+              },
+            },
+          },
+        ],
+      };
+
+      // 使用刚指定的配置项和数据显示图表。
+      myChart.setOption(option);
+    </script>
+  </body>
+</html>
